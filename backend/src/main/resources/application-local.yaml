@@ -10,6 +10,7 @@ spring:
       hibernate:
         format_sql: true
 
+# WARNING: SQL bind tracing can expose transcript text. Use only with non-sensitive local data.
 logging:
   level:
     org.flywaydb: DEBUG

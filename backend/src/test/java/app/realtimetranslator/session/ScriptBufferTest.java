@@ -69,7 +69,7 @@ class ScriptBufferTest {
     void markFlushed_movesWatermark() {
         buffer.add(entry(1));
         buffer.add(entry(2));
-        buffer.markFlushed();
+        buffer.markFlushed(2);
 
         assertEquals(0, buffer.unflushedCount());
         assertTrue(buffer.getUnflushedEntries().isEmpty());
@@ -84,13 +84,35 @@ class ScriptBufferTest {
     void clear_resetsEverything() {
         buffer.add(entry(1));
         buffer.add(entry(2));
-        buffer.markFlushed();
+        buffer.markFlushed(2);
         buffer.add(entry(3));
 
         buffer.clear();
 
         assertEquals(0, buffer.size());
         assertEquals(0, buffer.unflushedCount());
+    }
+
+    @Test
+    void markFlushed_advancesOnlyByPersistedSnapshotSize() {
+        buffer.add(entry(1));
+        buffer.add(entry(2));
+        List<ScriptEntry> snapshot = buffer.getUnflushedEntries();
+
+        buffer.add(entry(3));
+        buffer.markFlushed(snapshot.size());
+
+        assertEquals(2, buffer.flushedCount());
+        assertEquals(List.of(3L), buffer.getUnflushedEntries().stream()
+                .map(ScriptEntry::sequenceNumber).toList());
+    }
+
+    @Test
+    void markFlushed_rejectsWatermarkPastBufferEnd() {
+        buffer.add(entry(1));
+
+        assertThrows(IllegalStateException.class, () -> buffer.markFlushed(2));
+        assertEquals(0, buffer.flushedCount());
     }
 
     private ScriptEntry entry(long seq) {

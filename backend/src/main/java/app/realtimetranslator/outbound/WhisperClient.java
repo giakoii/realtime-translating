@@ -1,70 +1,39 @@
 package app.realtimetranslator.outbound;
 
-import app.realtimetranslator.config.AppProperties;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.core.io.ByteArrayResource;
-import org.springframework.http.MediaType;
-import org.springframework.http.client.MultipartBodyBuilder;
-import org.springframework.stereotype.Component;
-import org.springframework.web.client.RestClient;
-import org.springframework.web.client.RestClientException;
+import java.time.Duration;
 
-/**
- * Sends audio to OpenAI Whisper API and returns the transcription.
- * Uses Spring's {@link RestClient} (synchronous) with simple retry logic.
- */
-@Slf4j
+import app.realtimetranslator.config.AppProperties;
+import org.springframework.core.io.ByteArrayResource;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.stereotype.Component;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.web.client.RestClient;
+
+/** Synchronous client for OpenAI audio transcription. */
 @Component
 public class WhisperClient {
-
-    private static final String WHISPER_URL = "https://api.openai.com/v1/audio/transcriptions";
+    private static final String TRANSCRIPTIONS_PATH = "/audio/transcriptions";
 
     private final RestClient restClient;
+    private final String transcriptionsUrl;
     private final String model;
     private final int maxRetries;
 
-    public WhisperClient(AppProperties props, RestClient.Builder restClientBuilder) {
-        var whisperCfg = props.openai().whisper();
-        this.model = whisperCfg.model();
-        this.maxRetries = whisperCfg.maxRetries();
-
-        this.restClient = restClientBuilder
-                .defaultHeader("Authorization", "Bearer " + props.openai().apiKey())
-                .build();
+    public WhisperClient(AppProperties properties) {
+        var openAi = properties.openai();
+        var whisper = openAi.whisper();
+        this.model = whisper.model();
+        this.maxRetries = whisper.maxRetries();
+        this.transcriptionsUrl = OpenAiHttp.endpoint(openAi.baseUrl(), TRANSCRIPTIONS_PATH);
+        this.restClient = OpenAiHttp.newClient(openAi.baseUrl(), openAi.apiKey(),
+                Duration.ofSeconds(whisper.timeoutSeconds()));
     }
 
-    /**
-     * Transcribes raw PCM audio via Whisper. Converts PCM → WAV internally
-     * because Whisper requires a recognized audio container format.
-     *
-     * @return transcription result with text and detected language
-     * @throws RestClientException if all retries are exhausted
-     */
     public WhisperResponse transcribe(byte[] pcmAudio, int sampleRate) {
         byte[] wavAudio = AudioConverter.addWavHeader(pcmAudio, sampleRate, 1, 16);
-
-        RestClientException lastException = null;
-
-        for (int attempt = 0; attempt <= maxRetries; attempt++) {
-            try {
-                if (attempt > 0) {
-                    long backoffMs = (long) Math.pow(2, attempt) * 500;
-                    log.warn("[STT001] Whisper retry {}/{} after {}ms", attempt, maxRetries, backoffMs);
-                    Thread.sleep(backoffMs);
-                }
-
-                return doTranscribe(wavAudio);
-
-            } catch (RestClientException e) {
-                lastException = e;
-                log.warn("[STT001] Whisper call failed (attempt {}): {}", attempt + 1, e.getMessage());
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new RestClientException("Interrupted during retry backoff", e);
-            }
-        }
-
-        throw lastException;
+        return OpenAiRetry.execute(maxRetries, () -> doTranscribe(wavAudio));
     }
 
     private WhisperResponse doTranscribe(byte[] wavAudio) {
@@ -75,16 +44,19 @@ public class WhisperClient {
             }
         };
 
-        var bodyBuilder = new MultipartBodyBuilder();
-        bodyBuilder.part("file", audioResource)
-                .contentType(MediaType.parseMediaType("audio/wav"));
-        bodyBuilder.part("model", model);
-        bodyBuilder.part("response_format", "verbose_json");
+        var fileHeaders = new HttpHeaders();
+        fileHeaders.setContentType(MediaType.parseMediaType("audio/wav"));
+        fileHeaders.setContentDispositionFormData("file", audioResource.getFilename());
+
+        var body = new LinkedMultiValueMap<String, Object>();
+        body.add("file", new HttpEntity<>(audioResource, fileHeaders));
+        body.add("model", model);
+        body.add("response_format", "verbose_json");
 
         return restClient.post()
-                .uri(WHISPER_URL)
+                .uri(transcriptionsUrl)
                 .contentType(MediaType.MULTIPART_FORM_DATA)
-                .body(bodyBuilder.build())
+                .body(body)
                 .retrieve()
                 .body(WhisperResponse.class);
     }

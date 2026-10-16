@@ -1,0 +1,43 @@
+{
+  "name": "frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "node scripts/copy-vad-assets.mjs && tsc -b && vite build",
+    "lint": "eslint .",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "e2e": "playwright test",
+    "e2e:full": "playwright test e2e/full-stack.spec.ts",
+    "postinstall": "node scripts/copy-vad-assets.mjs"
+  },
+  "dependencies": {
+    "@ricky0123/vad-web": "0.0.19",
+    "onnxruntime-web": "1.22.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "react-markdown": "10.1.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "@playwright/test": "1.56.1",
+    "@testing-library/jest-dom": "6.8.0",
+    "@testing-library/react": "16.3.0",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "4.7.0",
+    "eslint": "9.39.5",
+    "eslint-plugin-react-hooks": "5.2.0",
+    "eslint-plugin-react-refresh": "0.4.26",
+    "globals": "16.5.0",
+    "jsdom": "26.1.0",
+    "typescript": "5.7.3",
+    "typescript-eslint": "8.71.2",
+    "vite": "6.4.4",
+    "vitest": "3.2.4",
+    "ws": "8.22.0"
+  }
+}

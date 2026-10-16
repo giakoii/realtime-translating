@@ -1,9 +1,10 @@
 package app.realtimetranslator.session;
 
-import java.util.Collections;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * In-memory buffer that accumulates {@link ScriptEntry} records for one meeting session.
@@ -26,6 +27,7 @@ public class ScriptBuffer {
     // Tracks how far we've flushed to DB, so each flush cycle only persists new entries
     // without clearing the buffer (clearing would break in-flight summary generation).
     private final AtomicInteger lastFlushedIndex = new AtomicInteger(0);
+    private final ReentrantLock flushLock = new ReentrantLock();
 
     public ScriptBuffer(String sessionId) {
         this.sessionId = sessionId;
@@ -49,9 +51,10 @@ public class ScriptBuffer {
      * coherence — e.g. resolving pronouns across consecutive utterances.
      */
     public List<String> getRecentOriginalLines(int n) {
-        int size = entries.size();
+        ScriptEntry[] snapshot = entries.toArray(ScriptEntry[]::new);
+        int size = snapshot.length;
         int from = Math.max(0, size - n);
-        return entries.subList(from, size).stream()
+        return Arrays.stream(snapshot, from, size)
                 .map(ScriptEntry::originalText)
                 .toList();
     }
@@ -61,31 +64,44 @@ public class ScriptBuffer {
      * full transcript when generating a summary after silence detection.
      */
     public List<ScriptEntry> getAll() {
-        return Collections.unmodifiableList(entries);
+        return List.of(entries.toArray(ScriptEntry[]::new));
     }
 
     /**
-     * Returns entries added since the last {@link #markFlushed()} call.
+     * Returns a stable snapshot of entries added since the last flush.
      *
      * @return defensive copy — safe to iterate while pipeline adds new entries
      */
     public List<ScriptEntry> getUnflushedEntries() {
         int flushed = lastFlushedIndex.get();
-        int size = entries.size();
+        ScriptEntry[] snapshot = entries.toArray(ScriptEntry[]::new);
+        int size = snapshot.length;
         if (flushed >= size) {
             return List.of();
         }
-        // Defensive copy to avoid ConcurrentModificationException if new
-        // entries arrive while the persist service iterates.
-        return List.copyOf(entries.subList(flushed, size));
+        return List.copyOf(Arrays.asList(snapshot).subList(flushed, size));
     }
 
     /**
-     * Advances flush watermark to current size. Call after successful batch persist
-     * to prevent those entries from being persisted again.
+     * Advances the flush watermark by the exact number of entries in a persisted
+     * snapshot. Entries appended while the snapshot is being saved remain unflushed.
      */
-    public void markFlushed() {
-        lastFlushedIndex.set(entries.size());
+    public void markFlushed(int count) {
+        if (count < 0) {
+            throw new IllegalArgumentException("count must be non-negative");
+        }
+        lastFlushedIndex.updateAndGet(current -> {
+            int next = current + count;
+            if (next > entries.size()) {
+                throw new IllegalStateException("flush watermark exceeds buffer size");
+            }
+            return next;
+        });
+    }
+
+    /** Serializes persistence attempts for this session without blocking appends. */
+    public ReentrantLock flushLock() {
+        return flushLock;
     }
 
     /**
@@ -107,5 +123,9 @@ public class ScriptBuffer {
 
     public int size() {
         return entries.size();
+    }
+
+    int flushedCount() {
+        return lastFlushedIndex.get();
     }
 }

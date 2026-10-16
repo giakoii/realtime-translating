@@ -4,6 +4,8 @@ import lombok.Getter;
 import lombok.Setter;
 import org.springframework.web.socket.WebSocketSession;
 
+import java.time.Instant;
+
 /**
  * Mutable carrier threaded through every {@link PipelineStage}.
  * Each stage reads what it needs and writes its output for the next stage.
@@ -17,6 +19,7 @@ public class PipelineContext {
     private byte[] audioBytes;
     private int sampleRate;
     private long sequenceNumber;
+    private Instant capturedAt;
     private WebSocketSession webSocketSession;
 
     // --- Produced by SpeechStage ---
@@ -25,6 +28,7 @@ public class PipelineContext {
 
     // --- Produced by TranslationStage (future) ---
     private String translatedText;
+    private String targetLanguage;
 
     // --- Abort control ---
     private boolean aborted;

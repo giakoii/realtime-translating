@@ -2,6 +2,7 @@ package app.realtimetranslator.pipeline;
 
 import app.realtimetranslator.outbound.WhisperClient;
 import app.realtimetranslator.outbound.WhisperResponse;
+import app.realtimetranslator.outbound.LanguageCodes;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.annotation.Order;
@@ -22,10 +23,15 @@ public class SpeechStage implements PipelineStage {
 
     @Override
     public void process(PipelineContext context) {
-        WhisperResponse response = whisperClient.transcribe(
+        WhisperResponse response;
+        try {
+            response = whisperClient.transcribe(
                 context.getAudioBytes(),
                 context.getSampleRate()
-        );
+            );
+        } catch (Exception failure) {
+            throw new SpeechRecognitionException(failure);
+        }
 
         if (response == null || response.text() == null || response.text().isBlank()) {
             context.abort("Empty transcription");
@@ -33,6 +39,11 @@ public class SpeechStage implements PipelineStage {
         }
 
         context.setOriginalText(response.text().trim());
-        context.setDetectedLanguage(response.language());
+        var language = LanguageCodes.toIso(response.language());
+        if (language.isEmpty()) {
+            context.abort("Unsupported language");
+            return;
+        }
+        context.setDetectedLanguage(language.get());
     }
 }

@@ -1,13 +1,7 @@
 package app.realtimetranslator.inbound;
 
-/**
- * WebSocket payload from client containing a single audio chunk.
- * The {@code data} field carries base64-encoded PCM Int16 mono audio.
- */
-public record AudioChunkDto(
-        String type,
-        String sessionId,
-        String data,
-        int sampleRate,
-        long sequenceNumber
-) {}
+import java.time.Instant;
+
+/** Audio and control envelopes on the single session WebSocket. */
+public record AudioChunkDto(String type, String sessionId, String data,
+                            Integer sampleRate, Long sequenceNumber, Instant capturedAt) {}

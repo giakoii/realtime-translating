@@ -3,6 +3,9 @@ package app.realtimetranslator.config;
 import app.realtimetranslator.inbound.AudioWebSocketHandler;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.web.socket.server.standard.ServletServerContainerFactoryBean;
+import java.util.Arrays;
 import org.springframework.web.socket.config.annotation.EnableWebSocket;
 import org.springframework.web.socket.config.annotation.WebSocketConfigurer;
 import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry;
@@ -18,10 +21,19 @@ import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry
 public class WebSocketConfig implements WebSocketConfigurer {
 
     private final AudioWebSocketHandler audioWebSocketHandler;
+    private final AppProperties properties;
 
     @Override
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
         registry.addHandler(audioWebSocketHandler, "/ws/audio")
-                .setAllowedOrigins("*"); // Dev phase — tighten for production
+                .setAllowedOrigins(Arrays.stream(properties.websocket().allowedOrigins().split(","))
+                        .map(String::trim).filter(value -> !value.isEmpty()).toArray(String[]::new));
+    }
+
+    @Bean
+    public ServletServerContainerFactoryBean webSocketContainer() {
+        var container = new ServletServerContainerFactoryBean();
+        container.setMaxTextMessageBufferSize(properties.websocket().maxMessageBytes());
+        return container;
     }
 }

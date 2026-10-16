@@ -6,106 +6,163 @@ import app.realtimetranslator.session.repository.MeetingRepository;
 import app.realtimetranslator.session.repository.MessageRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
+import java.util.OptionalInt;
 import java.util.UUID;
+import java.util.concurrent.locks.ReentrantLock;
 
-/**
- * Batch-persists {@link ScriptBuffer} entries to PostgreSQL.
- *
- * Three trigger points (event listeners wired in later features):
- * 1. Summary generated -> flush unflushed entries
- * 2. Session close (WebSocket disconnect) -> flush all + cleanup
- * 3. Buffer reaches 100 entries -> auto-flush in background
- *
- * Uses saveAll() for batch insert — Hibernate batch_size=50 is configured in
- * application.yaml to reduce DB round trips vs one INSERT per message.
- *
- * @see ScriptBuffer
- * @see SessionRepository
- */
+/** Persists per-session transcript buffers in commit-sized snapshots. */
 @Service
 @RequiredArgsConstructor
 @Slf4j
 public class BufferPersistService {
+
+    private static final DateTimeFormatter FALLBACK_TITLE =
+            DateTimeFormatter.ofPattern("'Meeting' yyyy-MM-dd HH:mm").withZone(ZoneOffset.UTC);
 
     private final SessionRepository sessionRepository;
     private final MeetingRepository meetingRepository;
     private final MessageRepository messageRepository;
 
     /**
-     * Creates a meeting record when a session starts.
-     *
-     * @return the meeting's database ID
+     * Returns the existing meeting or creates it. The database unique constraint is
+     * the final arbiter when two connections race to create the same session.
      */
-    @Transactional
-    public UUID createMeeting(String sessionId, String sourceLang, String targetLang) {
+    public UUID getOrCreateMeeting(String sessionId, String sourceLang, String targetLang) {
+        MeetingEntity existing = meetingRepository.findBySessionId(sessionId).orElse(null);
+        if (existing != null) {
+            return requireActive(existing).getId();
+        }
+
         MeetingEntity meeting = new MeetingEntity();
         meeting.setSessionId(sessionId);
         meeting.setSourceLang(sourceLang);
         meeting.setTargetLang(targetLang);
         meeting.setStartedAt(Instant.now());
 
-        MeetingEntity saved = meetingRepository.save(meeting);
-        log.info("[BUF001] Meeting created: sessionId={}, meetingId={}", sessionId, saved.getId());
-        return saved.getId();
+        try {
+            MeetingEntity saved = meetingRepository.save(meeting);
+            log.info("[BUF001] Meeting created: sessionId={}, meetingId={}", sessionId, saved.getId());
+            return saved.getId();
+        } catch (DataIntegrityViolationException race) {
+            MeetingEntity winner = meetingRepository.findBySessionId(sessionId).orElseThrow(() -> race);
+            return requireActive(winner).getId();
+        }
     }
 
-    /**
-     * Flushes only unflushed entries to DB, then advances the watermark.
-     *
-     * @return number of messages persisted
-     */
-    @Transactional
+    /** Kept as a compatibility alias for callers from the original BUF001 feature. */
+    public UUID createMeeting(String sessionId, String sourceLang, String targetLang) {
+        return getOrCreateMeeting(sessionId, sourceLang, targetLang);
+    }
+
+    /** Flushes one stable snapshot, blocking behind another flush for this session. */
     public int persistUnflushedMessages(String sessionId) {
         ScriptBuffer buffer = sessionRepository.get(sessionId).orElse(null);
         if (buffer == null) {
-            log.warn("[BUF001] No active buffer for sessionId={}", sessionId);
             return 0;
         }
 
-        List<ScriptEntry> unflushed = buffer.getUnflushedEntries();
-        if (unflushed.isEmpty()) {
+        ReentrantLock lock = buffer.flushLock();
+        lock.lock();
+        try {
+            return persistSnapshot(sessionId, buffer);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Attempts a flush without waiting. An empty value means another trigger owns
+     * the flush lock; zero means the lock was acquired but there was no work.
+     */
+    public OptionalInt tryPersistUnflushedMessages(String sessionId) {
+        ScriptBuffer buffer = sessionRepository.get(sessionId).orElse(null);
+        if (buffer == null) {
+            return OptionalInt.of(0);
+        }
+
+        ReentrantLock lock = buffer.flushLock();
+        if (!lock.tryLock()) {
+            return OptionalInt.empty();
+        }
+        try {
+            return OptionalInt.of(persistSnapshot(sessionId, buffer));
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Finalizes a meeting once. The buffer remains reachable if either the final
+     * message save or meeting update fails, allowing the close retrier to recover.
+     */
+    public void endSession(String sessionId) {
+        ScriptBuffer buffer = sessionRepository.get(sessionId).orElse(null);
+        if (buffer == null) {
+            finalizeMeeting(sessionId);
+            return;
+        }
+
+        ReentrantLock lock = buffer.flushLock();
+        lock.lock();
+        try {
+            int flushed = persistSnapshot(sessionId, buffer);
+            finalizeMeeting(sessionId);
+            sessionRepository.remove(sessionId);
+            log.info("[BUF001] Session ended: sessionId={}, lastFlushed={}", sessionId, flushed);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private int persistSnapshot(String sessionId, ScriptBuffer buffer) {
+        List<ScriptEntry> snapshot = buffer.getUnflushedEntries();
+        if (snapshot.isEmpty()) {
             return 0;
         }
 
         MeetingEntity meeting = meetingRepository.findBySessionId(sessionId)
-                .orElseThrow(() -> new IllegalStateException(
-                        "Meeting not found for sessionId=" + sessionId));
-
-        List<MessageEntity> entities = unflushed.stream()
+                .orElseThrow(() -> new IllegalStateException("Meeting not found for sessionId=" + sessionId));
+        List<MessageEntity> entities = snapshot.stream()
                 .map(entry -> toEntity(entry, meeting.getId()))
                 .toList();
 
-        // saveAll triggers Hibernate batch insert (batch_size=50 in config)
-        // to avoid one INSERT round-trip per message.
+        // The repository transaction commits before this proxy invocation returns.
         messageRepository.saveAll(entities);
-        buffer.markFlushed();
-
+        buffer.markFlushed(snapshot.size());
         log.info("[BUF001] Persisted {} messages for sessionId={}", entities.size(), sessionId);
         return entities.size();
     }
 
-    /**
-     * Ends a session: flush remaining entries, update meeting record, free memory.
-     */
-    @Transactional
-    public void endSession(String sessionId) {
-        int flushed = persistUnflushedMessages(sessionId);
-
+    private void finalizeMeeting(String sessionId) {
         MeetingEntity meeting = meetingRepository.findBySessionId(sessionId).orElse(null);
-        if (meeting != null) {
-            meeting.setEndedAt(Instant.now());
-            meeting.setTotalMessages(messageRepository.countByMeetingId(meeting.getId()));
-            meetingRepository.save(meeting);
+        if (meeting == null) {
+            return;
         }
 
-        // Release in-memory buffer — entries are now in PostgreSQL.
-        sessionRepository.remove(sessionId);
-        log.info("[BUF001] Session ended: sessionId={}, lastFlushed={}", sessionId, flushed);
+        int totalMessages = messageRepository.countByMeetingId(meeting.getId());
+        // Targeted updates cannot merge a stale null title over a concurrently
+        // generated title. markEndedIfNull also preserves close idempotency.
+        meetingRepository.markEndedIfNull(meeting.getId(), Instant.now());
+        meetingRepository.updateTotalMessages(meeting.getId(), totalMessages);
+
+        MeetingEntity refreshed = meetingRepository.findBySessionId(sessionId).orElse(meeting);
+        if (totalMessages > 0 && refreshed.getTitle() == null) {
+            meetingRepository.updateTitleIfNull(meeting.getId(), FALLBACK_TITLE.format(meeting.getStartedAt()));
+        }
+    }
+
+    private MeetingEntity requireActive(MeetingEntity meeting) {
+        if (meeting.getEndedAt() != null) {
+            throw new SessionEndedException(meeting.getSessionId());
+        }
+        return meeting;
     }
 
     private MessageEntity toEntity(ScriptEntry entry, UUID meetingId) {
