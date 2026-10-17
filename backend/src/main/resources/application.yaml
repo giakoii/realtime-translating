@@ -28,3 +28,60 @@ spring:
     enabled: true
     locations: classpath:db/migration
     baseline-on-migrate: false
+
+app:
+  openai:
+    api-key: ${OPENAI_API_KEY:}
+    base-url: ${OPENAI_BASE_URL:https://api.openai.com/v1}
+    whisper:
+      model: whisper-1
+      timeout-seconds: 10
+      max-retries: 2
+    gpt:
+      model: gpt-4o
+      temperature: 0.3
+      max-tokens: 500
+      timeout-seconds: 8
+      max-retries: 2
+  translation:
+    context-window-size: 5
+  summary:
+    model: gpt-4o
+    temperature: 0.5
+    max-tokens: 2000
+    timeout-seconds: 30
+    max-retries: 1
+    min-entries: 3
+    head-entries: 50
+    tail-entries: 200
+    max-full-entries: 1000
+  title:
+    model: gpt-4o
+    temperature: 0.3
+    max-tokens: 40
+    timeout-seconds: 8
+    max-retries: 1
+    max-length: 120
+  silence:
+    threshold-seconds: 30
+    check-interval-ms: 1000
+  buffer:
+    flush-threshold: 100
+    flush-retry-cooldown-seconds: 5
+    final-flush-max-attempts: 3
+  session:
+    default-source-lang: ja
+    default-target-lang: vi
+    max-queued-chunks: 20
+    drain-timeout-seconds: 20
+  audio:
+    sample-rate: 16000
+    min-chunk-ms: 200
+    max-chunk-seconds: 30
+  websocket:
+    allowed-origins: "http://localhost:5173,tauri://localhost,http://tauri.localhost"
+    max-message-bytes: 2097152
+    send-time-limit-ms: 5000
+    send-buffer-limit-bytes: 524288
+  logging:
+    log-transcripts: false

@@ -1,0 +1,1 @@
+`speech-ja.wav` is a synthetic Japanese speech fixture generated on Windows with the built-in Microsoft Haruka Desktop text-to-speech voice. It contains four short phrases separated by 1.5-second silences and is used only as fake microphone input in Chromium. No personal recording is included.
